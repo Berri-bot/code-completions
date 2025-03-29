@@ -6,6 +6,7 @@ import queue
 import json
 import re
 import time
+import shutil
 from pathlib import Path
 from typing import Dict, Optional
 from config import config
@@ -44,8 +45,18 @@ class LSPManager:
             jar_files = list((jdt_path / "plugins").glob("org.eclipse.equinox.launcher_*.jar"))
             if not jar_files:
                 raise FileNotFoundError(f"No JDT launcher JAR found in {jdt_path}/plugins")
+            
             jar_path = jar_files[0]
-            logger.info(f"Starting Java LSP with: {jar_path}")
+            logger.info(f"Using JDT launcher: {jar_path}")
+
+            # Ensure workspace directory exists and is writable
+            workspace_dir = config.WORKSPACE_DIR / "java_workspace"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(workspace_dir), 0o777)
+
+            # Create configuration directory if it doesn't exist
+            config_dir = jdt_path / "configuration"
+            config_dir.mkdir(exist_ok=True)
 
             cmd = [
                 str(config.JDK_HOME / "bin" / "java"),
@@ -58,29 +69,64 @@ class LSPManager:
                 "-XX:+UseStringDeduplication",
                 "-Djava.home=" + str(config.JDK_HOME),
                 "-jar", str(jar_path),
-                "-configuration", str(config.JDT_CONFIG),
-                "-data", str(config.WORKSPACE_DIR / "java_workspace"),
+                "-configuration", str(config_dir),  # Use the created configuration directory
+                "-data", str(workspace_dir),
                 "--add-modules=ALL-SYSTEM",
                 "--add-opens", "java.base/java.util=ALL-UNNAMED",
                 "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+                "--add-opens", "java.base/java.net=ALL-UNNAMED",
+                "--add-opens", "java.base/sun.nio.fs=ALL-UNNAMED",
                 "-noverify"
             ]
+            
             logger.debug(f"Java LSP command: {' '.join(cmd)}")
+            
+            env = os.environ.copy()
+            env["JAVA_HOME"] = str(config.JDK_HOME)
+            env["WORKSPACE"] = str(workspace_dir)
+            
             cls._java_process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
-                text=False
+                text=False,
+                env=env
             )
-            time.sleep(5)  # Give server time to start
-            if cls._java_process.poll() is not None:
-                error = cls._java_process.stderr.read().decode()
-                raise RuntimeError(f"Java LSP server failed to start: {error}")
+            
+            # Wait and check process status
+            start_time = time.time()
+            timeout = 30
+            while time.time() - start_time < timeout:
+                if cls._java_process.poll() is not None:
+                    stdout, stderr = cls._java_process.communicate()
+                    stdout_str = stdout.decode('utf-8') if stdout else "No stdout output"
+                    error = stderr.decode('utf-8') if stderr else "No error message provided"
+                    logger.error(f"Java LSP stdout: {stdout_str}")
+                    logger.error(f"Java LSP stderr: {error}")
+                    
+                    # Check for and copy log file
+                    log_pattern = r"See the log file\s+(.+\.log)"
+                    match = re.search(log_pattern, stdout_str)
+                    if match:
+                        log_file = Path(match.group(1))
+                        if log_file.exists():
+                            dest_log = Path("/app/logs") / log_file.name
+                            shutil.copy(log_file, dest_log)
+                            logger.error(f"Copied JDT LS log to: {dest_log}")
+                            with open(dest_log, 'r') as f:
+                                logger.error(f"JDT LS log contents:\n{f.read()}")
+                    
+                    raise RuntimeError(f"Java LSP server failed to start: {error}")
+                time.sleep(1)
+            
             logger.info(f"Java LSP server started with PID: {cls._java_process.pid}")
+            
         except Exception as e:
             logger.error(f"Failed to start Java LSP server: {str(e)}", exc_info=True)
+            if cls._java_process and cls._java_process.poll() is None:
+                cls._java_process.terminate()
             raise
 
     @classmethod
@@ -88,7 +134,12 @@ class LSPManager:
         try:
             cmd = config.PYTHON_LSP_CMD
             cls._python_process = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
+                cmd, 
+                stdin=subprocess.PIPE, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True, 
+                bufsize=1
             )
             logger.info(f"Python LSP server started with PID: {cls._python_process.pid}")
         except Exception as e:
@@ -130,11 +181,15 @@ class LSPManager:
     @classmethod
     def _read_java_errors(cls):
         while True:
-            line = cls._java_process.stderr.readline()
-            if not line:
-                logger.warning("Java LSP stderr closed")
+            try:
+                line = cls._java_process.stderr.readline()
+                if not line:
+                    logger.warning("Java LSP stderr closed")
+                    break
+                logger.error(f"Java LSP error: {line.decode('utf-8').strip()}")
+            except Exception as e:
+                logger.error(f"Error reading Java LSP errors: {str(e)}", exc_info=True)
                 break
-            logger.error(f"Java LSP error: {line.decode().strip()}")
 
     @classmethod
     def _read_python_output(cls):
@@ -167,11 +222,15 @@ class LSPManager:
     @classmethod
     def _read_python_errors(cls):
         while True:
-            line = cls._python_process.stderr.readline()
-            if not line:
-                logger.warning("Python LSP stderr closed")
+            try:
+                line = cls._python_process.stderr.readline()
+                if not line:
+                    logger.warning("Python LSP stderr closed")
+                    break
+                logger.error(f"Python LSP error: {line.strip()}")
+            except Exception as e:
+                logger.error(f"Error reading Python LSP errors: {str(e)}", exc_info=True)
                 break
-            logger.error(f"Python LSP error: {line.strip()}")
 
     @classmethod
     def send_java_request(cls, message: dict) -> Optional[dict]:
@@ -186,7 +245,6 @@ class LSPManager:
                 cls._java_process.stdin.write(headers + message_str.encode('utf-8'))
                 cls._java_process.stdin.flush()
                 
-                # Additional wait for project configuration
                 if message.get("method") == "textDocument/completion":
                     time.sleep(0.5)
                 
@@ -230,7 +288,7 @@ class LSPManager:
     @classmethod
     def shutdown(cls):
         try:
-            if cls._java_process:
+            if cls._java_process and cls._java_process.poll() is None:
                 cls.send_java_notification({
                     "jsonrpc": "2.0",
                     "method": "exit",
@@ -238,7 +296,7 @@ class LSPManager:
                 })
                 cls._java_process.terminate()
                 cls._java_process.wait(timeout=5)
-            if cls._python_process:
+            if cls._python_process and cls._python_process.poll() is None:
                 cls._python_process.terminate()
                 cls._python_process.wait(timeout=5)
             logger.info("LSP servers shutdown")

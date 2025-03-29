@@ -41,7 +41,6 @@ class PythonService:
             return []
             
         try:
-            # Notify LSP of document open
             LSPManager.send_python_notification({
                 "jsonrpc": "2.0",
                 "method": "textDocument/didOpen",
@@ -55,7 +54,6 @@ class PythonService:
                 }
             })
             
-            # Request completions
             response = LSPManager.send_python_request({
                 "jsonrpc": "2.0",
                 "method": "textDocument/completion",

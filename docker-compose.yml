@@ -10,10 +10,7 @@ services:
       - ./logs:/app/logs
     environment:
       - JAVA_HOME=/app/lsp/java/jdk-21.0.2
-      - JDT_HOME=/app/lsp/java/jdt-language-server-1.36.0
-      - LOG_LEVEL=DEBUG
+      - JDT_HOME=/app/lsp/java/jdt-language-server-1.37.0
+      - WORKSPACE_DIR=/app/workspace
+    mem_limit: 4g
     restart: unless-stopped
-    mem_limit: 2g
-    cpus: "1.0"
-    privileged: true
-  

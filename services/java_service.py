@@ -87,6 +87,8 @@ class JavaService:
                     "params": {}
                 })
                 logger.info(f"Java LSP initialized for workspace: {self.workspace}")
+            else:
+                logger.error(f"Java LSP initialization failed: {response.get('error', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Error initializing Java LSP: {str(e)}", exc_info=True)
             raise
@@ -97,13 +99,8 @@ class JavaService:
             return []
             
         try:
-            # Ensure file is in src/main/java
             file_path = self._ensure_proper_location(uri, text)
-            
-            # Notify LSP of document open
             self._send_did_open(file_path, text)
-            
-            # Request completions
             return self._request_completions(file_path, line, column)
         except Exception as e:
             logger.error(f"Error getting completions: {str(e)}", exc_info=True)
@@ -153,6 +150,7 @@ class JavaService:
         })
         
         if not response or "error" in response:
+            logger.error(f"Completion request failed: {response.get('error', 'No response')}")
             return []
             
         result = response.get("result", {})
@@ -171,17 +169,14 @@ class JavaService:
             file_path = Path(uri.replace("file://", ""))
             class_name, package = self._parse_class_info(text)
             
-            # Create package structure
             class_dir = self.src_dir
             if package:
                 class_dir = class_dir.joinpath(*package.split('.'))
                 class_dir.mkdir(parents=True, exist_ok=True)
             
-            # Write source file
             src_path = class_dir / f"{class_name}.java"
             src_path.write_text(text)
             
-            # Compile
             compile_result = subprocess.run(
                 [str(config.JDK_HOME / "bin" / "javac"), str(src_path)],
                 cwd=str(self.workspace),
@@ -192,16 +187,9 @@ class JavaService:
             if compile_result.returncode != 0:
                 return {"output": "", "error": compile_result.stderr}
             
-            # Run with classpath
-            run_cmd = [
-                str(config.JDK_HOME / "bin" / "java"),
-                "-cp",
-                str(self.src_dir),  # Add classpath to src/main/java
-                f"{package}.{class_name}" if package else class_name
-            ]
-            
             run_result = subprocess.run(
-                run_cmd,
+                [str(config.JDK_HOME / "bin" / "java"), 
+                 f"{package}.{class_name}" if package else class_name],
                 cwd=str(self.workspace),
                 capture_output=True,
                 text=True
